@@ -24,6 +24,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
@@ -311,15 +312,19 @@ fun StrobeStripBar(
   modifier: Modifier = Modifier,
 ) {
   var phase by remember { mutableFloatStateOf(0f) }
+  val curHasSignal by rememberUpdatedState(hasSignal)
+  val curCentsError by rememberUpdatedState(centsError)
+  val curTolerance by rememberUpdatedState(toleranceCents)
 
-  LaunchedEffect(hasSignal, centsError) {
+  LaunchedEffect(Unit) {
     var lastNanos = 0L
     while (true) {
       withFrameNanos { now ->
         if (lastNanos != 0L) {
           val dt = ((now - lastNanos) / 1_000_000_000.0).toFloat().coerceAtMost(0.05f)
-          if (hasSignal) {
-            val effCents = if (abs(centsError) <= toleranceCents * 0.4) 0.0 else centsError
+          if (curHasSignal) {
+            val err = curCentsError
+            val effCents = if (abs(err) <= curTolerance * 0.4) 0.0 else err
             // Scrolls left when flat (-), right when sharp (+), locked stationary at 0
             val cyclesPerSec = (effCents.coerceIn(-60.0, 60.0) * 0.16).toFloat()
             phase = (phase + cyclesPerSec * dt) % 100f
@@ -394,7 +399,9 @@ fun StrobeStripBar(
       for (b in 0 until bandCount) {
         val segs = segmentsPerBand[b]
         val period = size.width / segs
-        val shift = ((phase * harmonics[b]) % 1f) * period
+        val rawMod = (phase * harmonics[b]) % 1f
+        val wrapped = if (rawMod < 0f) rawMod + 1f else rawMod
+        val shift = wrapped * period
         val pStrength = if (b == 0) 1f else partialStrengths.getOrElse(b) { 0.4f }.coerceIn(0.25f, 1f)
         val alpha = if (hasSignal) (0.35f + 0.65f * pStrength) else 0.18f
 

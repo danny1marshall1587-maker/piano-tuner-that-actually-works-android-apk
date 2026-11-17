@@ -133,6 +133,11 @@ class PianoPitchEngine(private val sampleRate: Float = 48_000f) {
     stabilization: Float,
     gateOpen: Boolean,
   ): PitchAnalysisResult {
+    if (!autoFollow && heldResult != null && heldResult!!.detectedKeyIndex != manualKeyIndex.coerceIn(0, PianoNotes.TOTAL_KEYS - 1)) {
+      heldResult = null
+      transientHoldFrames = 0
+    }
+
     if (totalSamplesWritten < FAST_BUF_LEN) {
       return PitchAnalysisResult(
         detectedKeyIndex = manualKeyIndex,
@@ -286,11 +291,11 @@ class PianoPitchEngine(private val sampleRate: Float = 48_000f) {
     }
 
     // Stabilization filter (wide range 0..1):
-    // 0.0 -> instantaneous (alpha = 0.85, median window 1)
-    // 0.5 -> balanced (alpha = 0.28, median window 5)
-    // 1.0 -> heavy rock-steady damping (alpha = 0.06, median window 11)
+    // 0.0 -> instantaneous (alpha = 0.90, median window 1)
+    // 0.5 -> balanced (alpha = 0.16, median window 8)
+    // 1.0 -> ultra-steady damping (alpha = 0.03, median window 15)
     val stab = stabilization.coerceIn(0f, 1f).toDouble()
-    val medianSize = (1 + (stab * 10.0).roundToInt()).coerceIn(1, 11)
+    val medianSize = (1 + (stab * 14.0).roundToInt()).coerceIn(1, 15)
     if (recentCentsWindow.size >= medianSize) {
       while (recentCentsWindow.size >= medianSize) recentCentsWindow.removeFirst()
     }
@@ -298,7 +303,7 @@ class PianoPitchEngine(private val sampleRate: Float = 48_000f) {
     val sortedCents = recentCentsWindow.sorted()
     val medianCents = sortedCents[sortedCents.size / 2]
 
-    val alpha = (0.88 * exp(-2.7 * stab)).coerceIn(0.05, 0.90)
+    val alpha = (0.90 * exp(-3.4 * stab)).coerceIn(0.03, 0.92)
     smoothedCents = if (!hasSmoothedInit || abs(medianCents - smoothedCents) > 35.0) {
       hasSmoothedInit = true
       medianCents
@@ -374,15 +379,16 @@ class PianoPitchEngine(private val sampleRate: Float = 48_000f) {
         score += peak * weights[p - 1]
       }
 
-      // Octave-error guard: check if sub-octave f1/2 has strong odd partials (1, 3, 5)
+      // Octave-error guard: check if sub-octave f1/2 has strong odd partials (1, 3) within +/- 45 cents
       if (k >= 12) {
         val subF1 = targets[k - 12]
-        val subBin = (subF1 / bHz).roundToInt().coerceIn(1, mag.size - 2)
-        val subOdd3 = (StretchTuningEngine.partialFreq(subF1, 3, bCurve[k - 12]) / bHz).roundToInt().coerceIn(1, mag.size - 2)
-        val subEnergy = mag[subBin] + mag[subOdd3] * 0.8
-        val f1Bin = (f1 / bHz).roundToInt().coerceIn(1, mag.size - 2)
-        if (subEnergy > mag[f1Bin] * 1.35 && k < 55) {
-          score *= 0.82
+        val subOdd3Hz = StretchTuningEngine.partialFreq(subF1, 3, bCurve[k - 12])
+        val subPeak1 = windowPeak(mag, bHz, subF1, 45.0)
+        val subPeak3 = windowPeak(mag, bHz, subOdd3Hz, 45.0)
+        val subEnergy = subPeak1 + subPeak3 * 0.8
+        val f1Peak = windowPeak(mag, bHz, f1, 45.0)
+        if (subEnergy > f1Peak * 1.35 && k < 55) {
+          score *= 0.80
         }
       }
 
@@ -392,6 +398,17 @@ class PianoPitchEngine(private val sampleRate: Float = 48_000f) {
       }
     }
     return bestKey
+  }
+
+  private fun windowPeak(mag: DoubleArray, binHz: Double, centerHz: Double, centsHalfWidth: Double): Double {
+    if (centerHz <= 20.0 || centerHz > sampleRate * 0.44) return 0.0
+    val bMin = (PianoNotes.centsToHz(centerHz, -centsHalfWidth) / binHz).toInt().coerceIn(1, mag.size - 2)
+    val bMax = (PianoNotes.centsToHz(centerHz, centsHalfWidth) / binHz).toInt().coerceIn(bMin, mag.size - 2)
+    var peak = 0.0
+    for (b in bMin..bMax) {
+      if (mag[b] > peak) peak = mag[b]
+    }
+    return peak
   }
 
   private fun partialWeightsForKey(keyIndex: Int): DoubleArray {
@@ -520,27 +537,39 @@ class PianoPitchEngine(private val sampleRate: Float = 48_000f) {
 
     val fp = StretchTuningEngine.partialFreq(detectedF1, bestP, keyB)
 
-    // 1. Complex demodulation around fp across linearLong (341 ms window) to measure amplitude beating!
-    val chunkSize = 64
-    val numChunks = LONG_FFT_SIZE / chunkSize // 256 envelope points (~750 Hz envelope rate)
-    val env = DoubleArray(numChunks)
+    // 1. Quadrature complex demodulation around fp with 2-stage 24 Hz LPF before decimation
+    //    (eliminates 2*fp aliasing into the 1-14 Hz beat band on single strings near 370-385 Hz)
+    val settleSamples = 1800
+    val decimation = 128
+    val numPoints = (LONG_FFT_SIZE - settleSamples) / decimation
+    val env = DoubleArray(numPoints)
     val omega = 2.0 * PI * fp / sampleRate.toDouble()
+    val lpfAlpha = 1.0 - exp(-2.0 * PI * 24.0 / sampleRate.toDouble())
+    var re1 = 0.0
+    var im1 = 0.0
+    var re2 = 0.0
+    var im2 = 0.0
     var sumEnv = 0.0
-    for (c in 0 until numChunks) {
-      var re = 0.0
-      var im = 0.0
-      val base = c * chunkSize
-      for (i in 0 until chunkSize) {
-        val s = linearLong[base + i].toDouble()
-        val ph = omega * (base + i)
-        re += s * cos(ph)
-        im -= s * sin(ph)
+    var ptIdx = 0
+
+    for (n in 0 until LONG_FFT_SIZE) {
+      val s = linearLong[n].toDouble()
+      val ph = omega * n
+      val rawRe = s * cos(ph)
+      val rawIm = -s * sin(ph)
+      re1 += (rawRe - re1) * lpfAlpha
+      im1 += (rawIm - im1) * lpfAlpha
+      re2 += (re1 - re2) * lpfAlpha
+      im2 += (im1 - im2) * lpfAlpha
+
+      if (n >= settleSamples && (n - settleSamples) % decimation == 0 && ptIdx < numPoints) {
+        val mag = hypot(re2, im2)
+        env[ptIdx++] = mag
+        sumEnv += mag
       }
-      val mag = hypot(re, im) / chunkSize
-      env[c] = mag
-      sumEnv += mag
     }
-    val meanEnv = sumEnv / numChunks
+    val actualPoints = ptIdx.coerceAtLeast(1)
+    val meanEnv = sumEnv / actualPoints
     if (meanEnv <= 1e-7) {
       return UnisonAnalysis(health = UnisonHealth.IDLE)
     }
@@ -550,39 +579,39 @@ class PianoPitchEngine(private val sampleRate: Float = 48_000f) {
     var sy = 0.0
     var sxx = 0.0
     var sxy = 0.0
-    for (i in 0 until numChunks) {
+    for (i in 0 until actualPoints) {
       sx += i
       sy += env[i]
       sxx += i * i.toDouble()
       sxy += i * env[i]
     }
-    val denom = numChunks * sxx - sx * sx
-    val slope = if (abs(denom) > 1e-9) (numChunks * sxy - sx * sy) / denom else 0.0
-    val intercept = (sy - slope * sx) / numChunks
+    val denom = actualPoints * sxx - sx * sx
+    val slope = if (abs(denom) > 1e-9) (actualPoints * sxy - sx * sy) / denom else 0.0
+    val intercept = (sy - slope * sx) / actualPoints
 
-    val detrended = DoubleArray(numChunks)
+    val detrended = DoubleArray(actualPoints)
     var varSum = 0.0
-    for (i in 0 until numChunks) {
+    for (i in 0 until actualPoints) {
       val d = env[i] - (intercept + slope * i)
       detrended[i] = d
       varSum += d * d
     }
-    val modDepth = (sqrt(varSum / numChunks) / meanEnv).coerceIn(0.0, 1.0)
+    val modDepth = (sqrt(varSum / actualPoints) / meanEnv).coerceIn(0.0, 1.0)
 
     // Find dominant beat frequency between 0.8 Hz and 14 Hz via DFT on detrended envelope
-    val envRate = sampleRate.toDouble() / chunkSize
+    val envRate = sampleRate.toDouble() / decimation
     var bestBeatHz = 0.0
     var bestBeatAmp = 0.0
     var fHz = 0.8
     while (fHz <= 14.0) {
       var r = 0.0
       var im = 0.0
-      for (i in 0 until numChunks) {
+      for (i in 0 until actualPoints) {
         val ang = 2.0 * PI * fHz * i / envRate
         r += detrended[i] * cos(ang)
         im -= detrended[i] * sin(ang)
       }
-      val amp = hypot(r, im) / numChunks
+      val amp = hypot(r, im) / actualPoints
       if (amp > bestBeatAmp) {
         bestBeatAmp = amp
         bestBeatHz = fHz

@@ -2,6 +2,7 @@ package com.danaudio.pianotuner.ui
 
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.viewModelScope
 import com.danaudio.pianotuner.audio.AudioCaptureEngine
 import com.danaudio.pianotuner.audio.AudioFrameTelemetry
 import com.danaudio.pianotuner.audio.ToneGenerator
@@ -23,10 +24,14 @@ import com.danaudio.pianotuner.dsp.TemperamentType
 import java.io.File
 import java.util.UUID
 import kotlin.math.abs
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
 
 class TunerViewModel(application: Application) : AndroidViewModel(application) {
 
@@ -39,6 +44,8 @@ class TunerViewModel(application: Application) : AndroidViewModel(application) {
 
   private var stableInTuneFrames = 0
   private var stableInTuneKey = -1
+  private var userPausedMic = false
+  private var saveJob: Job? = null
 
   init {
     val loaded = repository.loadStore()
@@ -48,21 +55,40 @@ class TunerViewModel(application: Application) : AndroidViewModel(application) {
 
   fun onPermissionResult(granted: Boolean) {
     _uiState.update { it.copy(hasMicPermission = granted) }
-    if (granted) {
-      startListening()
+    if (granted && !userPausedMic) {
+      startListening(byUser = false)
     }
   }
 
-  fun startListening() {
+  fun startListening(byUser: Boolean = true) {
+    if (byUser) userPausedMic = false
     if (!_uiState.value.hasMicPermission) return
     syncEngineParams()
     audioEngine.start()
     _uiState.update { it.copy(isListening = true) }
   }
 
-  fun stopListening() {
+  fun stopListening(byUser: Boolean = true) {
+    if (byUser) userPausedMic = true
     audioEngine.stop()
     _uiState.update { it.copy(isListening = false, audioSourceName = "Stopped") }
+  }
+
+  fun onAppForeground() {
+    if (_uiState.value.hasMicPermission && !userPausedMic && !_uiState.value.isListening) {
+      startListening(byUser = false)
+    }
+  }
+
+  fun onAppBackground() {
+    if (_uiState.value.isListening) {
+      stopListening(byUser = false)
+    }
+    if (_uiState.value.toneForkPlaying) {
+      toneGenerator.stop()
+      audioEngine.suppressDuringTone = false
+      _uiState.update { it.copy(toneForkPlaying = false) }
+    }
   }
 
   fun selectTab(tab: TunerTab) {
@@ -324,11 +350,19 @@ class TunerViewModel(application: Application) : AndroidViewModel(application) {
     updateToneGeneratorFreqIfPlaying()
   }
 
+  private fun saveStoreAsync(store: PianoStoreState) {
+    saveJob?.cancel()
+    saveJob = viewModelScope.launch(Dispatchers.IO) {
+      delay(150)
+      repository.saveStore(store)
+    }
+  }
+
   // --- Multi-Piano Profiles & Tuning Logs ---
   fun switchProfile(profileId: String) {
     _uiState.update { state ->
       val nextStore = state.store.copy(activeProfileId = profileId)
-      repository.saveStore(nextStore)
+      saveStoreAsync(nextStore)
       state.copy(store = nextStore, statusBanner = "Loaded piano profile")
     }
     recomputeStretchCurve()
@@ -355,7 +389,7 @@ class TunerViewModel(application: Application) : AndroidViewModel(application) {
         activeProfileId = newId,
         profiles = listOf(profile) + state.store.profiles,
       )
-      repository.saveStore(nextStore)
+      saveStoreAsync(nextStore)
       state.copy(store = nextStore, statusBanner = "Created profile: ${profile.name}")
     }
     recomputeStretchCurve()
@@ -368,7 +402,7 @@ class TunerViewModel(application: Application) : AndroidViewModel(application) {
     val nextActive = if (_uiState.value.store.activeProfileId == profileId) remaining.first().id else _uiState.value.store.activeProfileId
     _uiState.update { state ->
       val nextStore = state.store.copy(activeProfileId = nextActive, profiles = remaining)
-      repository.saveStore(nextStore)
+      saveStoreAsync(nextStore)
       state.copy(store = nextStore, statusBanner = "Deleted piano profile")
     }
     recomputeStretchCurve()
@@ -419,7 +453,7 @@ class TunerViewModel(application: Application) : AndroidViewModel(application) {
         if (p.id == state.store.activeProfileId) transform(p) else p
       }
       val nextStore = state.store.copy(profiles = updatedList)
-      repository.saveStore(nextStore)
+      saveStoreAsync(nextStore)
       state.copy(store = nextStore)
     }
   }
@@ -441,7 +475,8 @@ class TunerViewModel(application: Application) : AndroidViewModel(application) {
     // If Cyber-Denoiser Learn just finished, persist newly learned 10-band thresholds
     val learned = telemetry.denoiser.learnedThresholdsDb
     val nextDenoiserParams = if (learned != null) {
-      val updated = state.denoiserParams.copy(bandThresholdsDb = learned)
+      val avgDb = learned.average().toFloat().coerceIn(-100f, 0f)
+      val updated = state.denoiserParams.copy(masterThresholdDb = avgDb, bandThresholdsDb = learned)
       audioEngine.denoiserParams = updated
       updated
     } else {

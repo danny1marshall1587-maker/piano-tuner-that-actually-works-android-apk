@@ -97,13 +97,18 @@ object FftMath {
     realOut.fill(0.0)
     imagOut.fill(0.0)
     val copyLen = minOf(sampleCount, samples.size, window.size, fftSize)
+    var winSum = 0.0
     for (i in 0 until copyLen) {
-      realOut[i] = samples[i].toDouble() * window[i]
+      val w = window[i]
+      winSum += w
+      realOut[i] = samples[i].toDouble() * w
     }
     fft(realOut, imagOut)
+    // Normalize by half the coherent window sum so a unit sinusoid has peak ~1.0 regardless of FFT length
+    val norm = if (winSum > 1e-9) 2.0 / winSum else 1.0
     val half = fftSize / 2
     for (i in 0..half) {
-      magOut[i] = hypot(realOut[i], imagOut[i])
+      magOut[i] = hypot(realOut[i], imagOut[i]) * norm
     }
   }
 

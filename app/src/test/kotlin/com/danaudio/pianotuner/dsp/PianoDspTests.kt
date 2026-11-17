@@ -150,6 +150,32 @@ class PianoDspTests {
       "Should flag out-of-tune unison strings (got ${resBeat.unison.health})",
       resBeat.unison.health == UnisonHealth.STRINGS_OUT || resBeat.unison.health == UnisonHealth.SLIGHT_BEAT,
     )
+
+    // 5. Test single pure string at 373.0 Hz (F#4 alias trap for 750 Hz chunk demodulation) reports CLEAN!
+    engine.reset()
+    val pureFSharp = FloatArray(16384) { i ->
+      (0.5 * sin(2.0 * PI * 369.99 * i / sr) + 0.2 * sin(2.0 * PI * 740.0 * i / sr)).toFloat()
+    }
+    engine.pushSamples(pureFSharp, pureFSharp.size)
+    val resPure = engine.analyze(curve, autoFollow = false, manualKeyIndex = 45, PartialMode.AUTO, stabilization = 0f, gateOpen = true)
+    assertEquals(
+      "Pure F#4 without beating should report CLEAN (detail=${resPure.unison.detailMessage})",
+      UnisonHealth.CLEAN,
+      resPure.unison.health,
+    )
+
+    // 6. Test short 42ms C8 burst still wins in Auto Follow even with faint lingering C5 in older buffer!
+    engine.reset()
+    val preRing = FloatArray(14336) { i ->
+      (0.06 * sin(2.0 * PI * 523.25 * i / sr)).toFloat()
+    }
+    val burstC8 = FloatArray(2048) { i ->
+      (0.35 * sin(2.0 * PI * 4186.01 * i / sr)).toFloat()
+    }
+    engine.pushSamples(preRing, preRing.size)
+    engine.pushSamples(burstC8, burstC8.size)
+    val resAutoC8 = engine.analyze(curve, autoFollow = true, manualKeyIndex = 48, PartialMode.AUTO, stabilization = 0f, gateOpen = true)
+    assertEquals("Auto Follow should pick fresh C8 burst over faint lingering C5", 87, resAutoC8.detectedKeyIndex)
   }
 
   @Test

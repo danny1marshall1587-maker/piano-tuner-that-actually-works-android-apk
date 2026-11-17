@@ -260,13 +260,26 @@ fun PianoKeyboardDisplay(
           contentAlignment = Alignment.BottomCenter,
         ) {
           if (isActive) {
-            Text(
-              text = key.pitchClass,
-              fontSize = 8.sp,
-              fontWeight = FontWeight.Bold,
-              color = labelColor,
+            Column(
+              horizontalAlignment = Alignment.CenterHorizontally,
               modifier = Modifier.padding(bottom = 4.dp),
-            )
+            ) {
+              if (status != null && status != KeyTuningStatus.UNCHECKED) {
+                Box(
+                  modifier = Modifier
+                    .size(6.dp)
+                    .clip(CircleShape)
+                    .background(if (status == KeyTuningStatus.IN_TUNE) IN_TUNE_GREEN else RECORDED_YELLOW)
+                )
+                Spacer(Modifier.height(2.dp))
+              }
+              Text(
+                text = key.pitchClass,
+                fontSize = 8.sp,
+                fontWeight = FontWeight.Bold,
+                color = labelColor,
+              )
+            }
           }
         }
       }
