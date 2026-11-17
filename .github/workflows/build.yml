@@ -25,8 +25,11 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
+      - name: Setup Android SDK (Platform 36 & Build-Tools 36)
+        run: |
+          SDK_MGR=$(find "$ANDROID_HOME/cmdline-tools" -name sdkmanager -type f | head -n 1)
+          yes | "$SDK_MGR" --licenses >/dev/null 2>&1 || true
+          "$SDK_MGR" "platforms;android-36" "build-tools;36.0.0" "platform-tools"
 
       - name: Grant Gradle Wrapper execute permission
         run: chmod +x gradlew
