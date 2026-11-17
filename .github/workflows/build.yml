@@ -1,0 +1,89 @@
+name: Build & Release Piano Tuner Pro APK
+
+on:
+  push:
+    branches: [ main, master ]
+    tags: [ 'v*' ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Test & Build Android APK
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Grant Gradle Wrapper execute permission
+        run: chmod +x gradlew
+
+      - name: Run Unit Tests
+        run: ./gradlew testDebugUnitTest --no-daemon
+
+      - name: Build Debug & Release APKs
+        run: ./gradlew assembleDebug assembleRelease --no-daemon
+
+      - name: Sign Release APK for Direct Sideloading
+        run: |
+          BUILD_TOOLS_DIR=$(ls -d "$ANDROID_HOME/build-tools/"* | sort -V | tail -n 1)
+          KEYSTORE_PATH="/tmp/release-key.jks"
+          if [ -n "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" ]; then
+            echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 --decode > "$KEYSTORE_PATH"
+            KS_PASS="${{ secrets.ANDROID_KEYSTORE_PASS }}"
+            KEY_ALIAS="${{ secrets.ANDROID_KEY_ALIAS }}"
+            KEY_PASS="${{ secrets.ANDROID_KEY_PASS }}"
+          else
+            KS_PASS="pianotunerpro"
+            KEY_ALIAS="pianotuner"
+            KEY_PASS="pianotunerpro"
+            keytool -genkeypair -v -keystore "$KEYSTORE_PATH" -keyalg RSA -keysize 2048 \
+              -validity 10000 -alias "$KEY_ALIAS" -storepass "$KS_PASS" -keypass "$KEY_PASS" \
+              -dname "CN=DanAudio, OU=PianoTunerPro, O=DanAudio, L=Studio, ST=Audio, C=GB"
+          fi
+          mkdir -p dist
+          cp app/build/outputs/apk/debug/app-debug.apk dist/PianoTunerPro-debug.apk
+          UNSIGNED=$(find app/build/outputs/apk/release -name "*.apk" | head -n 1)
+          "$BUILD_TOOLS_DIR/zipalign" -f -p 4 "$UNSIGNED" /tmp/aligned.apk
+          "$BUILD_TOOLS_DIR/apksigner" sign --ks "$KEYSTORE_PATH" --ks-pass "pass:$KS_PASS" \
+            --key-pass "pass:$KEY_PASS" --ks-key-alias "$KEY_ALIAS" \
+            --out dist/PianoTunerPro-release.apk /tmp/aligned.apk
+
+      - name: Upload APK Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: PianoTunerPro-APKs
+          path: dist/*.apk
+
+  release:
+    name: Publish Public GitHub Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download Built APKs
+        uses: actions/download-artifact@v4
+        with:
+          name: PianoTunerPro-APKs
+          path: release-apks
+
+      - name: Create Public GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            release-apks/PianoTunerPro-release.apk
+            release-apks/PianoTunerPro-debug.apk
