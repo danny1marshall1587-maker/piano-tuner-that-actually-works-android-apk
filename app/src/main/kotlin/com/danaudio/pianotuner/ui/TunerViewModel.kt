@@ -47,6 +47,14 @@ class TunerViewModel(application: Application) : AndroidViewModel(application) {
   private var userPausedMic = false
   private var saveJob: Job? = null
 
+  // Guided Auto-Record Map / Check Tuning state
+  private var guidedSequence: List<Int> = emptyList()
+  private var guidedSeqPos: Int = 0
+  private var guidedHoldFrames: Int = 0
+  private var guidedCooldownFrames: Int = 0
+  private var guidedPrevKey: Int = -1
+  private var guidedLastDriftedKey: Int = -1
+
   init {
     val loaded = repository.loadStore()
     _uiState.update { it.copy(store = loaded) }
@@ -102,7 +110,13 @@ class TunerViewModel(application: Application) : AndroidViewModel(application) {
   fun toggleAutoFollow() {
     val next = !_uiState.value.autoFollowPitch
     audioEngine.autoFollow = next
-    _uiState.update { it.copy(autoFollowPitch = next) }
+    _uiState.update {
+      it.copy(
+        autoFollowPitch = next,
+        guidedMode = if (next) GuidedScriptMode.NONE else it.guidedMode,
+        guidedPromptMessage = if (next) "" else it.guidedPromptMessage,
+      )
+    }
   }
 
   fun setManualKey(keyIndex: Int, switchToManual: Boolean = true) {
@@ -112,8 +126,33 @@ class TunerViewModel(application: Application) : AndroidViewModel(application) {
       audioEngine.autoFollow = false
     }
     stableInTuneFrames = 0
+    guidedHoldFrames = 0
+    guidedCooldownFrames = 6
     _uiState.update { state ->
       val intervals = StretchTuningEngine.computeIntervalChecks(clamped, state.stretchCurve)
+      var nextStepIdx = state.guidedStepIndex
+      var nextPrompt = state.guidedPromptMessage
+      if (state.guidedMode != GuidedScriptMode.NONE && guidedSequence.isNotEmpty()) {
+        val found = guidedSequence.indexOfFirst { it >= clamped }
+        guidedSeqPos = if (found >= 0) found else guidedSequence.lastIndex
+        nextStepIdx = guidedSeqPos
+        val actualKey = guidedSequence[guidedSeqPos]
+        audioEngine.manualKeyIndex = actualKey
+        val noteName = PianoNotes.keyInfo(actualKey).noteName
+        nextPrompt = if (state.guidedMode == GuidedScriptMode.CHECK_TUNING) {
+          "Play $noteName — check settled pitch"
+        } else {
+          "Play $noteName — listening..."
+        }
+        return@update state.copy(
+          activeKeyIndex = actualKey,
+          autoFollowPitch = false,
+          intervalChecks = StretchTuningEngine.computeIntervalChecks(actualKey, state.stretchCurve),
+          inTuneHoldProgress = 0f,
+          guidedStepIndex = nextStepIdx,
+          guidedPromptMessage = nextPrompt,
+        )
+      }
       state.copy(
         activeKeyIndex = clamped,
         autoFollowPitch = if (switchToManual) false else state.autoFollowPitch,
@@ -151,7 +190,7 @@ class TunerViewModel(application: Application) : AndroidViewModel(application) {
     _uiState.update { it.copy(autoAdvanceSweep = !it.autoAdvanceSweep) }
   }
 
-  // --- Sine Wave Tuning Fork ---
+  // --- Sine Wave Tuning Fork (Middle C octave for notes below C4) ---
   fun toggleToneFork() {
     val state = _uiState.value
     if (state.toneForkPlaying) {
@@ -159,7 +198,7 @@ class TunerViewModel(application: Application) : AndroidViewModel(application) {
       audioEngine.suppressDuringTone = false
       _uiState.update { it.copy(toneForkPlaying = false) }
     } else {
-      val freq = state.stretchCurve.targetFrequenciesHz[state.activeKeyIndex]
+      val (freq, _) = state.tuningForkInfo
       toneGenerator.setVolume(state.toneForkVolume)
       toneGenerator.start(freq)
       audioEngine.suppressDuringTone = state.muteMicDuringFork
@@ -182,9 +221,168 @@ class TunerViewModel(application: Application) : AndroidViewModel(application) {
   private fun updateToneGeneratorFreqIfPlaying() {
     val state = _uiState.value
     if (state.toneForkPlaying) {
-      val freq = state.stretchCurve.targetFrequenciesHz[state.activeKeyIndex]
+      val (freq, _) = state.tuningForkInfo
       toneGenerator.setFrequency(freq)
     }
+  }
+
+  // --- Guided Auto-Record Map & Check Tuning (Settling) Scripts ---
+  private fun buildGuidedSequence(allKeys: Boolean): List<Int> {
+    if (allKeys) return (0 until PianoNotes.TOTAL_KEYS).toList()
+    val step = _uiState.value.activeProfile.sweepStepMode.semitoneStep.coerceAtLeast(1)
+    val list = mutableListOf<Int>()
+    var k = 0
+    while (k < PianoNotes.TOTAL_KEYS) {
+      list.add(k)
+      k += step
+    }
+    if (list.last() != PianoNotes.TOTAL_KEYS - 1) {
+      list.add(PianoNotes.TOTAL_KEYS - 1)
+    }
+    return list
+  }
+
+  fun startAutoRecordMap() {
+    startGuidedScript(GuidedScriptMode.AUTO_RECORD_MAP)
+  }
+
+  fun startCheckTuning() {
+    startGuidedScript(GuidedScriptMode.CHECK_TUNING)
+  }
+
+  private fun startGuidedScript(mode: GuidedScriptMode) {
+    val allKeys = _uiState.value.guidedAllKeys
+    val seq = buildGuidedSequence(allKeys)
+    if (seq.isEmpty()) return
+
+    guidedSequence = seq
+    guidedSeqPos = 0
+    guidedHoldFrames = 0
+    guidedCooldownFrames = 6
+    guidedPrevKey = -1
+    guidedLastDriftedKey = -1
+
+    val firstKey = seq.first()
+    audioEngine.autoFollow = false
+    audioEngine.manualKeyIndex = firstKey
+    val firstNote = PianoNotes.keyInfo(firstKey).noteName
+    val prompt = if (mode == GuidedScriptMode.CHECK_TUNING) {
+      "Play $firstNote — check settled pitch"
+    } else {
+      "Play $firstNote — listening..."
+    }
+
+    _uiState.update { state ->
+      state.copy(
+        guidedMode = mode,
+        autoFollowPitch = false,
+        activeKeyIndex = firstKey,
+        intervalChecks = StretchTuningEngine.computeIntervalChecks(firstKey, state.stretchCurve),
+        guidedStepIndex = 0,
+        guidedTotalCount = seq.size,
+        guidedPromptMessage = prompt,
+        inTuneHoldProgress = 0f,
+      )
+    }
+    updateToneGeneratorFreqIfPlaying()
+  }
+
+  fun toggleGuidedAllKeys() {
+    val nextAll = !_uiState.value.guidedAllKeys
+    _uiState.update { it.copy(guidedAllKeys = nextAll) }
+    if (_uiState.value.guidedMode != GuidedScriptMode.NONE) {
+      val mode = _uiState.value.guidedMode
+      val curKey = _uiState.value.activeKeyIndex
+      val seq = buildGuidedSequence(nextAll)
+      guidedSequence = seq
+      val found = seq.indexOfFirst { it >= curKey }
+      guidedSeqPos = if (found >= 0) found else 0
+      val targetKey = seq[guidedSeqPos]
+      audioEngine.manualKeyIndex = targetKey
+      val note = PianoNotes.keyInfo(targetKey).noteName
+      _uiState.update { state ->
+        state.copy(
+          activeKeyIndex = targetKey,
+          intervalChecks = StretchTuningEngine.computeIntervalChecks(targetKey, state.stretchCurve),
+          guidedStepIndex = guidedSeqPos,
+          guidedTotalCount = seq.size,
+          guidedPromptMessage = if (mode == GuidedScriptMode.CHECK_TUNING) "Play $note — check settled pitch" else "Play $note — listening...",
+        )
+      }
+      updateToneGeneratorFreqIfPlaying()
+    }
+  }
+
+  fun skipGuidedKey() {
+    if (_uiState.value.guidedMode == GuidedScriptMode.NONE) return
+    advanceGuidedStep()
+  }
+
+  fun stopGuidedScript() {
+    guidedSequence = emptyList()
+    guidedHoldFrames = 0
+    guidedCooldownFrames = 0
+    guidedPrevKey = -1
+    guidedLastDriftedKey = -1
+    _uiState.update {
+      it.copy(
+        guidedMode = GuidedScriptMode.NONE,
+        guidedPromptMessage = "",
+        inTuneHoldProgress = 0f,
+      )
+    }
+  }
+
+  private fun advanceGuidedStep() {
+    val mode = _uiState.value.guidedMode
+    if (guidedSeqPos + 1 >= guidedSequence.size) {
+      val total = guidedSequence.size
+      val doneMsg = if (mode == GuidedScriptMode.CHECK_TUNING) {
+        "Check Tuning complete ($total keys checked) — settled keys marked Gold!"
+      } else {
+        "Piano Map complete ($total keys mapped)!"
+      }
+      guidedSequence = emptyList()
+      guidedHoldFrames = 0
+      guidedCooldownFrames = 0
+      guidedPrevKey = -1
+      guidedLastDriftedKey = -1
+      _uiState.update {
+        it.copy(
+          guidedMode = GuidedScriptMode.NONE,
+          guidedPromptMessage = "",
+          inTuneHoldProgress = 0f,
+          statusBanner = doneMsg,
+        )
+      }
+      return
+    }
+
+    guidedPrevKey = guidedSequence[guidedSeqPos]
+    guidedSeqPos++
+    guidedHoldFrames = 0
+    guidedCooldownFrames = 12 // ~380ms decay guard so previous note tail doesn't falsely trigger next note
+    guidedLastDriftedKey = -1
+
+    val nextKey = guidedSequence[guidedSeqPos]
+    audioEngine.manualKeyIndex = nextKey
+    val nextNote = PianoNotes.keyInfo(nextKey).noteName
+    val prompt = if (mode == GuidedScriptMode.CHECK_TUNING) {
+      "Play $nextNote — check settled pitch"
+    } else {
+      "Play $nextNote — listening..."
+    }
+
+    _uiState.update { state ->
+      state.copy(
+        activeKeyIndex = nextKey,
+        intervalChecks = StretchTuningEngine.computeIntervalChecks(nextKey, state.stretchCurve),
+        guidedStepIndex = guidedSeqPos,
+        guidedPromptMessage = prompt,
+        inTuneHoldProgress = 0f,
+      )
+    }
+    updateToneGeneratorFreqIfPlaying()
   }
 
   // --- Key Recording (Yellow) & In-Tune Registration (Green) ---
@@ -225,9 +423,21 @@ class TunerViewModel(application: Application) : AndroidViewModel(application) {
 
   fun markActiveKeyInTuneGreen() {
     val state = _uiState.value
-    markKeyInTuneGreenInternal(state.activeKeyIndex, state.pitchResult.smoothedCentsError)
-    val noteName = PianoNotes.keyInfo(state.activeKeyIndex).noteName
-    _uiState.update { it.copy(statusBanner = "Registered $noteName In Tune [Green]") }
+    val key = state.activeKeyIndex
+    val cents = if (state.pitchResult.hasSignal) state.pitchResult.smoothedCentsError else 0.0
+    if (state.guidedMode == GuidedScriptMode.CHECK_TUNING) {
+      markKeyStatusInternal(key, KeyTuningStatus.SETTLED_GOLD, cents)
+      val noteName = PianoNotes.keyInfo(key).noteName
+      _uiState.update { it.copy(statusBanner = "Verified $noteName Settled [Gold]") }
+      advanceGuidedStep()
+    } else {
+      markKeyStatusInternal(key, KeyTuningStatus.IN_TUNE, cents)
+      val noteName = PianoNotes.keyInfo(key).noteName
+      _uiState.update { it.copy(statusBanner = "Note OK — $noteName Tuned [Green]") }
+      if (state.guidedMode == GuidedScriptMode.AUTO_RECORD_MAP) {
+        advanceGuidedStep()
+      }
+    }
   }
 
   fun cycleKeyStatus(keyIndex: Int) {
@@ -235,7 +445,8 @@ class TunerViewModel(application: Application) : AndroidViewModel(application) {
     val nextStatus = when (existing?.status) {
       null, KeyTuningStatus.UNCHECKED -> KeyTuningStatus.RECORDED
       KeyTuningStatus.RECORDED -> KeyTuningStatus.IN_TUNE
-      KeyTuningStatus.IN_TUNE -> KeyTuningStatus.UNCHECKED
+      KeyTuningStatus.IN_TUNE -> KeyTuningStatus.SETTLED_GOLD
+      KeyTuningStatus.SETTLED_GOLD -> KeyTuningStatus.UNCHECKED
     }
     updateActiveProfile { profile ->
       val map = profile.keyRecords.toMutableMap()
@@ -252,17 +463,26 @@ class TunerViewModel(application: Application) : AndroidViewModel(application) {
     recomputeStretchCurve()
   }
 
-  private fun markKeyInTuneGreenInternal(keyIndex: Int, currentCents: Double) {
+  private fun markKeyStatusInternal(
+    keyIndex: Int,
+    status: KeyTuningStatus,
+    currentCents: Double,
+    measuredB: Double? = null,
+    unisonLabel: String? = null,
+  ) {
     val state = _uiState.value
     val existing = state.activeKeyRecords[keyIndex]
     val pitch = state.pitchResult
     val updatedRec = KeyMeasurementRecord(
       keyIndex = keyIndex,
-      status = KeyTuningStatus.IN_TUNE,
-      measuredBeforeCents = existing?.measuredBeforeCents ?: currentCents,
-      lastTunedCents = currentCents,
-      measuredInharmonicityB = pitch.measuredInharmonicityB ?: existing?.measuredInharmonicityB,
-      unisonHealthName = if (pitch.hasSignal) pitch.unison.health.label else existing?.unisonHealthName,
+      status = status,
+      measuredBeforeCents = when (status) {
+        KeyTuningStatus.RECORDED -> currentCents
+        else -> existing?.measuredBeforeCents ?: currentCents
+      },
+      lastTunedCents = if (status == KeyTuningStatus.IN_TUNE || status == KeyTuningStatus.SETTLED_GOLD) currentCents else existing?.lastTunedCents,
+      measuredInharmonicityB = measuredB ?: pitch.measuredInharmonicityB ?: existing?.measuredInharmonicityB,
+      unisonHealthName = unisonLabel ?: if (pitch.hasSignal) pitch.unison.health.label else existing?.unisonHealthName,
       updatedAtEpochMs = System.currentTimeMillis(),
     )
     updateActiveProfile { profile ->
@@ -414,7 +634,7 @@ class TunerViewModel(application: Application) : AndroidViewModel(application) {
     val beforeVals = recs.mapNotNull { it.measuredBeforeCents }
     val afterVals = recs.mapNotNull { it.lastTunedCents ?: it.measuredBeforeCents }
     val recordedCnt = recs.count { it.status == KeyTuningStatus.RECORDED }
-    val inTuneCnt = recs.count { it.status == KeyTuningStatus.IN_TUNE }
+    val inTuneCnt = recs.count { it.status == KeyTuningStatus.IN_TUNE || it.status == KeyTuningStatus.SETTLED_GOLD }
 
     val log = TuningSessionLog(
       id = UUID.randomUUID().toString(),
@@ -491,22 +711,106 @@ class TunerViewModel(application: Application) : AndroidViewModel(application) {
       state.intervalChecks
     }
 
-    // Auto-register Green when steady inside tolerance for ~1.1s (~34 frames at 31 Hz)
+    val tol = state.activeProfile.inTuneToleranceCents
     var holdProgress = 0f
-    if (state.autoLockInTune && p.hasSignal && !p.isTransientHold && p.confidence >= 0.45) {
-      val tol = state.activeProfile.inTuneToleranceCents
-      if (abs(p.smoothedCentsError) <= tol) {
+    var bannerOverride: String? = null
+
+    if (state.guidedMode != GuidedScriptMode.NONE) {
+      if (guidedCooldownFrames > 0) {
+        guidedCooldownFrames--
+      } else {
+        val isHighTreble = activeKey >= 68
+        val matchesTarget = p.hasSignal && p.confidence >= 0.40 &&
+          (!p.isTransientHold || (isHighTreble && guidedHoldFrames > 0)) &&
+          (p.bestAutoKeyIndex == activeKey || (activeKey < 12 && abs(p.centsError) <= 50.0 && p.bestAutoKeyIndex != guidedPrevKey))
+
+        if (matchesTarget) {
+          guidedHoldFrames++
+          val requiredFrames = when (state.guidedMode) {
+            GuidedScriptMode.AUTO_RECORD_MAP -> if (isHighTreble) 3 else 6
+            GuidedScriptMode.CHECK_TUNING -> if (isHighTreble) 4 else 9
+            GuidedScriptMode.NONE -> 6
+          }
+          holdProgress = (guidedHoldFrames.toFloat() / requiredFrames.toFloat()).coerceIn(0f, 1f)
+
+          if (guidedHoldFrames >= requiredFrames) {
+            val noteName = PianoNotes.keyInfo(activeKey).noteName
+            val inTune = abs(p.smoothedCentsError) <= tol
+            if (state.guidedMode == GuidedScriptMode.AUTO_RECORD_MAP) {
+              val status = if (inTune) KeyTuningStatus.IN_TUNE else KeyTuningStatus.RECORDED
+              markKeyStatusInternal(
+                keyIndex = activeKey,
+                status = status,
+                currentCents = p.smoothedCentsError,
+                measuredB = p.measuredInharmonicityB,
+                unisonLabel = p.unison.health.label,
+              )
+              bannerOverride = if (inTune) {
+                "$noteName in tune (${String.format("%+.1f¢", p.smoothedCentsError)}) [Green]"
+              } else {
+                "Mapped $noteName (${String.format("%+.1f¢", p.smoothedCentsError)}) [Yellow]"
+              }
+              advanceGuidedStep()
+            } else if (state.guidedMode == GuidedScriptMode.CHECK_TUNING) {
+              if (inTune) {
+                markKeyStatusInternal(
+                  keyIndex = activeKey,
+                  status = KeyTuningStatus.SETTLED_GOLD,
+                  currentCents = p.smoothedCentsError,
+                  measuredB = p.measuredInharmonicityB,
+                  unisonLabel = p.unison.health.label,
+                )
+                bannerOverride = "$noteName settled & in tune! [Gold]"
+                advanceGuidedStep()
+              } else {
+                // Note drifted out of tolerance: mark Yellow once and let user tune it into Gold or Skip
+                if (guidedLastDriftedKey != activeKey) {
+                  guidedLastDriftedKey = activeKey
+                  markKeyStatusInternal(
+                    keyIndex = activeKey,
+                    status = KeyTuningStatus.RECORDED,
+                    currentCents = p.smoothedCentsError,
+                    measuredB = p.measuredInharmonicityB,
+                    unisonLabel = p.unison.health.label,
+                  )
+                }
+                _uiState.update {
+                  it.copy(
+                    guidedPromptMessage = "$noteName drifted ${String.format("%+.1f¢", p.smoothedCentsError)} — tune to Gold or Skip",
+                  )
+                }
+                guidedHoldFrames = requiredFrames - 2
+              }
+            }
+          }
+        } else if (!p.hasSignal) {
+          guidedHoldFrames = 0
+        }
+      }
+    } else if (state.autoLockInTune && p.hasSignal && p.confidence >= 0.45) {
+      // Fast auto-check-off: when testing or tuning, any note heard in tune turns Green automatically
+      val isHighTreble = activeKey >= 64
+      val validFrame = !p.isTransientHold || (isHighTreble && stableInTuneFrames > 0)
+      if (validFrame && abs(p.smoothedCentsError) <= tol) {
         if (stableInTuneKey != activeKey) {
           stableInTuneKey = activeKey
           stableInTuneFrames = 1
         } else {
           stableInTuneFrames++
         }
-        holdProgress = (stableInTuneFrames / 32f).coerceIn(0f, 1f)
-        if (stableInTuneFrames == 32) {
-          markKeyInTuneGreenInternal(activeKey, p.smoothedCentsError)
+        val required = if (isHighTreble) 5 else 10
+        holdProgress = (stableInTuneFrames.toFloat() / required.toFloat()).coerceIn(0f, 1f)
+        if (stableInTuneFrames == required) {
+          val existingStatus = state.activeKeyRecords[activeKey]?.status
+          // Keep Gold if already verified settled; otherwise mark Green (IN_TUNE)
+          val targetStatus = if (existingStatus == KeyTuningStatus.SETTLED_GOLD) {
+            KeyTuningStatus.SETTLED_GOLD
+          } else {
+            KeyTuningStatus.IN_TUNE
+          }
+          markKeyStatusInternal(activeKey, targetStatus, p.smoothedCentsError)
         }
-      } else {
+      } else if (!p.hasSignal || abs(p.smoothedCentsError) > tol) {
         stableInTuneFrames = 0
       }
     } else {
@@ -516,14 +820,18 @@ class TunerViewModel(application: Application) : AndroidViewModel(application) {
     _uiState.update { cur ->
       cur.copy(
         audioSourceName = telemetry.audioSourceName,
-        activeKeyIndex = activeKey,
-        intervalChecks = intervals,
+        activeKeyIndex = if (cur.guidedMode != GuidedScriptMode.NONE) cur.activeKeyIndex else activeKey,
+        intervalChecks = if (cur.guidedMode != GuidedScriptMode.NONE) cur.intervalChecks else intervals,
         denoiserParams = nextDenoiserParams,
         denoiserSnapshot = telemetry.denoiser,
         dynamicsSnapshot = telemetry.dynamics,
         pitchResult = p,
         inTuneHoldProgress = holdProgress,
-        statusBanner = if (learned != null) "Cyber-Denoiser learned room noise floor!" else cur.statusBanner,
+        statusBanner = when {
+          learned != null -> "Cyber-Denoiser learned room noise floor!"
+          bannerOverride != null -> bannerOverride
+          else -> cur.statusBanner
+        },
       )
     }
   }

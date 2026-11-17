@@ -8,8 +8,9 @@ import kotlinx.serialization.Serializable
 @Serializable
 enum class KeyTuningStatus {
   UNCHECKED,
-  RECORDED, // Yellow: recorded measurement / sampled in sweep
+  RECORDED, // Yellow: recorded measurement / sampled in sweep / drifted during check
   IN_TUNE, // Green: registered as in tune
+  SETTLED_GOLD, // Gold: checked during Check Tuning pass and verified in tune & settled
 }
 
 @Serializable

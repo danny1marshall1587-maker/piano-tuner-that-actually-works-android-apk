@@ -97,6 +97,7 @@ fun ProfilesAndLogsTabScreen(
       profiles.forEach { prof ->
         val isActive = prof.id == activeProfile.id
         val inTuneCnt = prof.keyRecords.values.count { it.status == KeyTuningStatus.IN_TUNE }
+        val goldCnt = prof.keyRecords.values.count { it.status == KeyTuningStatus.SETTLED_GOLD }
         val recCnt = prof.keyRecords.values.count { it.status == KeyTuningStatus.RECORDED }
 
         Row(
@@ -126,7 +127,7 @@ fun ProfilesAndLogsTabScreen(
               Text(prof.locationOrOwner, fontSize = 10.sp, color = Color(0xFF94A3B8))
             }
             Text(
-              text = "Green: $inTuneCnt/88 • Yellow: $recCnt/88 • Logs: ${prof.logs.size}",
+              text = "Gold: $goldCnt/88 • Green: $inTuneCnt/88 • Yellow: $recCnt/88 • Logs: ${prof.logs.size}",
               fontSize = 10.sp,
               color = Color(0xFF4ADE80),
             )

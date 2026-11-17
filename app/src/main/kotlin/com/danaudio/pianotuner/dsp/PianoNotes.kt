@@ -27,6 +27,7 @@ data class PianoKeyInfo(
 object PianoNotes {
   const val TOTAL_KEYS = 88
   const val A0_MIDI = 21
+  const val C4_KEY_INDEX = 39 // Middle C (MIDI 60)
   const val A4_KEY_INDEX = 48 // MIDI 69 = A4
 
   private val NOTE_NAMES = arrayOf("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
@@ -96,5 +97,18 @@ object PianoNotes {
     if (freqHz <= 0.0) return A4_KEY_INDEX
     val midiFloat = 69.0 + 12.0 * (ln(freqHz / a4Hz) / ln(2.0))
     return (midiFloat.roundToInt() - A0_MIDI).coerceIn(0, TOTAL_KEYS - 1)
+  }
+
+  /**
+   * Returns (forkFrequencyHz, octavesUp) for the sine-wave tuning fork.
+   * For any note below Middle C (C4, key 39), shifts the key's stretched target pitch up by whole
+   * octaves into the Middle C octave (C4..B4) so phone speakers reproduce it clearly.
+   */
+  fun tuningForkFrequency(keyIndex: Int, stretchedTargetHz: Double): Pair<Double, Int> {
+    val k = keyIndex.coerceIn(0, TOTAL_KEYS - 1)
+    if (k >= C4_KEY_INDEX) return stretchedTargetHz to 0
+    val octavesUp = ((C4_KEY_INDEX - k) + 11) / 12
+    val multiplier = (1 shl octavesUp).toDouble()
+    return (stretchedTargetHz * multiplier) to octavesUp
   }
 }

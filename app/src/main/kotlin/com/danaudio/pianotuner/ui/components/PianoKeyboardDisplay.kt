@@ -48,12 +48,21 @@ import kotlin.math.roundToInt
 private val ACTIVE_RED = Color(0xFFEF4444)
 private val RECORDED_YELLOW = Color(0xFFFACC15)
 private val IN_TUNE_GREEN = Color(0xFF22C55E)
+private val SETTLED_GOLD = Color(0xFFF59E0B)
+
+private fun statusDotColor(status: KeyTuningStatus): Color = when (status) {
+  KeyTuningStatus.SETTLED_GOLD -> SETTLED_GOLD
+  KeyTuningStatus.IN_TUNE -> IN_TUNE_GREEN
+  KeyTuningStatus.RECORDED -> RECORDED_YELLOW
+  KeyTuningStatus.UNCHECKED -> Color.Transparent
+}
 
 /**
  * Interactive 88-key Piano Keyboard Display:
  * - Red: active note currently being tuned
- * - Yellow: recorded key (e.g. from "Record Every 3rd" sweep)
+ * - Yellow: recorded key / drifted out of tune
  * - Green: registered as in tune
+ * - Gold: checked & verified settled in tune
  */
 @Composable
 fun PianoKeyboardDisplay(
@@ -93,6 +102,7 @@ fun PianoKeyboardDisplay(
 
   val recordedCount = keyRecords.values.count { it.status == KeyTuningStatus.RECORDED }
   val inTuneCount = keyRecords.values.count { it.status == KeyTuningStatus.IN_TUNE }
+  val goldCount = keyRecords.values.count { it.status == KeyTuningStatus.SETTLED_GOLD }
 
   Column(
     modifier = modifier
@@ -108,13 +118,14 @@ fun PianoKeyboardDisplay(
       horizontalArrangement = Arrangement.SpaceBetween,
       verticalAlignment = Alignment.CenterVertically,
     ) {
-      Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
-        LegendDot("Tuning", ACTIVE_RED)
-        LegendDot("Recorded ($recordedCount)", RECORDED_YELLOW)
-        LegendDot("In Tune ($inTuneCount)", IN_TUNE_GREEN)
+      Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+        LegendDot("Tune", ACTIVE_RED)
+        LegendDot("Map ($recordedCount)", RECORDED_YELLOW)
+        LegendDot("OK ($inTuneCount)", IN_TUNE_GREEN)
+        LegendDot("Gold ($goldCount)", SETTLED_GOLD)
       }
       Text(
-        text = "Tap key = Tune • Long-press = Toggle status",
+        text = "Tap = Tune • Hold = Status",
         fontSize = 9.sp,
         color = Color(0xFF64748B),
       )
@@ -142,6 +153,7 @@ fun PianoKeyboardDisplay(
         val isActive = k == activeKeyIndex
         val col = when {
           isActive -> ACTIVE_RED
+          status == KeyTuningStatus.SETTLED_GOLD -> SETTLED_GOLD
           status == KeyTuningStatus.IN_TUNE -> IN_TUNE_GREEN
           status == KeyTuningStatus.RECORDED -> RECORDED_YELLOW
           PianoNotes.keyInfo(k).isBlack -> Color(0xFF0F172A)
@@ -175,8 +187,9 @@ fun PianoKeyboardDisplay(
 
           val bg = when {
             isActive -> ACTIVE_RED
+            status == KeyTuningStatus.SETTLED_GOLD -> Color(0xFFF59E0B)
             status == KeyTuningStatus.IN_TUNE -> Color(0xFF86EFAC)
-            status == KeyTuningStatus.RECORDED -> Color(0xFFFDE047)
+            status == KeyTuningStatus.RECORDED -> Color(0xFFFEF08A)
             else -> Color(0xFFF8FAFC)
           }
           val textColor = if (isActive) Color.White else Color(0xFF0F172A)
@@ -206,7 +219,7 @@ fun PianoKeyboardDisplay(
                   modifier = Modifier
                     .size(7.dp)
                     .clip(CircleShape)
-                    .background(if (status == KeyTuningStatus.IN_TUNE) IN_TUNE_GREEN else RECORDED_YELLOW)
+                    .background(statusDotColor(status))
                 )
                 Spacer(Modifier.height(2.dp))
               }
@@ -233,13 +246,14 @@ fun PianoKeyboardDisplay(
 
         val bg = when {
           isActive -> ACTIVE_RED
+          status == KeyTuningStatus.SETTLED_GOLD -> SETTLED_GOLD
           status == KeyTuningStatus.IN_TUNE -> IN_TUNE_GREEN
           status == KeyTuningStatus.RECORDED -> RECORDED_YELLOW
           else -> Color(0xFF111827)
         }
         val labelColor = when {
           isActive -> Color.White
-          status == KeyTuningStatus.RECORDED || status == KeyTuningStatus.IN_TUNE -> Color(0xFF0F172A)
+          status == KeyTuningStatus.RECORDED || status == KeyTuningStatus.IN_TUNE || status == KeyTuningStatus.SETTLED_GOLD -> Color(0xFF0F172A)
           else -> Color(0xFF94A3B8)
         }
 
@@ -269,7 +283,7 @@ fun PianoKeyboardDisplay(
                   modifier = Modifier
                     .size(6.dp)
                     .clip(CircleShape)
-                    .background(if (status == KeyTuningStatus.IN_TUNE) IN_TUNE_GREEN else RECORDED_YELLOW)
+                    .background(statusDotColor(status))
                 )
                 Spacer(Modifier.height(2.dp))
               }

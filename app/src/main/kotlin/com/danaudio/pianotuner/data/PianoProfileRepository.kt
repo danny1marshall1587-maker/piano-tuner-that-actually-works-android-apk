@@ -52,7 +52,8 @@ class PianoProfileRepository(private val storageFile: File) {
 
     val recorded = profile.keyRecords.values.filter { it.status == KeyTuningStatus.RECORDED }
     val inTune = profile.keyRecords.values.filter { it.status == KeyTuningStatus.IN_TUNE }
-    sb.appendLine("Current Key Board: ${inTune.size}/88 In Tune (Green) | ${recorded.size}/88 Recorded (Yellow)")
+    val gold = profile.keyRecords.values.filter { it.status == KeyTuningStatus.SETTLED_GOLD }
+    sb.appendLine("Current Key Board: ${gold.size}/88 Settled (Gold) | ${inTune.size}/88 In Tune (Green) | ${recorded.size}/88 Recorded (Yellow)")
     sb.appendLine()
 
     if (profile.keyRecords.isNotEmpty()) {

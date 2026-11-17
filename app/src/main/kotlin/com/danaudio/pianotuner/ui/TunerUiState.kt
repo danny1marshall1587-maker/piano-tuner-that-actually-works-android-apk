@@ -21,6 +21,12 @@ enum class TunerTab(val label: String) {
   PROFILES("Pianos & Logs"),
 }
 
+enum class GuidedScriptMode {
+  NONE,
+  AUTO_RECORD_MAP,
+  CHECK_TUNING,
+}
+
 data class TunerUiState(
   val selectedTab: TunerTab = TunerTab.TUNER,
   val hasMicPermission: Boolean = false,
@@ -40,6 +46,13 @@ data class TunerUiState(
   val toneForkPlaying: Boolean = false,
   val toneForkVolume: Float = 0.35f,
   val muteMicDuringFork: Boolean = false,
+
+  // Guided Auto-Map & Check-Tuning Script
+  val guidedMode: GuidedScriptMode = GuidedScriptMode.NONE,
+  val guidedAllKeys: Boolean = true,
+  val guidedStepIndex: Int = 0,
+  val guidedTotalCount: Int = PianoNotes.TOTAL_KEYS,
+  val guidedPromptMessage: String = "",
 
   // DSP Parameters & Live Telemetry
   val denoiserParams: CyberDenoiserParams = CyberDenoiserParams(),
@@ -80,4 +93,10 @@ data class TunerUiState(
 
   val activeKeyRecords: Map<Int, KeyMeasurementRecord>
     get() = activeProfile.keyRecords
+
+  val tuningForkInfo: Pair<Double, Int>
+    get() {
+      val target = stretchCurve.targetFrequenciesHz[activeKeyIndex.coerceIn(0, PianoNotes.TOTAL_KEYS - 1)]
+      return PianoNotes.tuningForkFrequency(activeKeyIndex, target)
+    }
 }

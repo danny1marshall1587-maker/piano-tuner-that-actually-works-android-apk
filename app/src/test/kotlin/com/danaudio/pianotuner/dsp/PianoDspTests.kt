@@ -212,4 +212,42 @@ class PianoDspTests {
     assertTrue("Treble C8 should stretch sharp", res.stretchOffsetsCents[87] > 10.0)
     assertTrue("Overpull on flat A0 (-24c @ 25%) should be +6c", kotlin.math.abs(res.overpullOffsetsCents[0] - 6.0) < 0.5)
   }
+
+  @Test
+  fun tuningFork_shiftsLowerNotesIntoMiddleCOctaveWithStretch() {
+    val curve = StretchTuningEngine.computeStretchCurve(
+      a4Hz = 440.0,
+      transposeCents = 0.0,
+      scaleType = PianoScaleType.UPRIGHT,
+      temperament = TemperamentType.EQUAL,
+      stretchFactor = 1.0,
+    )
+    // A0 (key 0) is 4 octaves below A4 -> shifted +4 octaves (* 16) into C4..B4 octave
+    val (a0ForkHz, a0Oct) = PianoNotes.tuningForkFrequency(0, curve.targetFrequenciesHz[0])
+    assertEquals(4, a0Oct)
+    assertEquals(curve.targetFrequenciesHz[0] * 16.0, a0ForkHz, 1e-6)
+    assertTrue("A0 shifted fork should sit in C4..B4 octave ($a0ForkHz Hz)", a0ForkHz in 260.0..495.0)
+
+    // A1 (key 12) -> +3 octaves (* 8) into A4 (~440 Hz minus stretch)
+    val (a1ForkHz, a1Oct) = PianoNotes.tuningForkFrequency(12, curve.targetFrequenciesHz[12])
+    assertEquals(3, a1Oct)
+    assertEquals(curve.targetFrequenciesHz[12] * 8.0, a1ForkHz, 1e-6)
+    assertTrue("A1 stretched fork should be slightly flat of 440 Hz due to negative bass stretch", a1ForkHz < 440.0 && a1ForkHz > 430.0)
+
+    // A2 (key 24) -> +2 octaves (* 4) into A4 (~440 Hz minus stretch)
+    val (a2ForkHz, a2Oct) = PianoNotes.tuningForkFrequency(24, curve.targetFrequenciesHz[24])
+    assertEquals(2, a2Oct)
+    assertEquals(curve.targetFrequenciesHz[24] * 4.0, a2ForkHz, 1e-6)
+    assertTrue("A2 stretched fork should be slightly flat of 440 Hz due to negative bass stretch", a2ForkHz < 440.0 && a2ForkHz > 430.0)
+
+    // B3 (key 38, right below Middle C) -> +1 octave (* 2)
+    val (b3ForkHz, b3Oct) = PianoNotes.tuningForkFrequency(38, curve.targetFrequenciesHz[38])
+    assertEquals(1, b3Oct)
+    assertEquals(curve.targetFrequenciesHz[38] * 2.0, b3ForkHz, 1e-6)
+
+    // C4 (key 39, Middle C) and C8 (key 87) -> 0 octave shift
+    val (c4ForkHz, c4Oct) = PianoNotes.tuningForkFrequency(39, curve.targetFrequenciesHz[39])
+    assertEquals(0, c4Oct)
+    assertEquals(curve.targetFrequenciesHz[39], c4ForkHz, 1e-6)
+  }
 }

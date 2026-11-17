@@ -43,7 +43,9 @@ data class UnisonAnalysis(
 data class PitchAnalysisResult(
   val hasSignal: Boolean = false,
   val isTransientHold: Boolean = false,
+  val onsetDetected: Boolean = false,
   val detectedKeyIndex: Int = PianoNotes.A4_KEY_INDEX,
+  val bestAutoKeyIndex: Int = PianoNotes.A4_KEY_INDEX,
   val detectedHz: Double = 0.0,
   val targetHz: Double = 440.0,
   val centsError: Double = 0.0, // + sharp, - flat
@@ -190,9 +192,10 @@ class PianoPitchEngine(private val sampleRate: Float = 48_000f) {
     val targets = stretchCurve.targetFrequenciesHz
     val bCurve = stretchCurve.inharmonicityCurveB
 
-    // Determine candidate key
+    // Always identify the loudest matching key in the spectrum (for auto-follow & guided script guard)
+    val bestAutoKey = findBestKeyAuto(targets, bCurve)
     val selectedKey = if (autoFollow) {
-      findBestKeyAuto(targets, bCurve)
+      bestAutoKey
     } else {
       manualKeyIndex.coerceIn(0, PianoNotes.TOTAL_KEYS - 1)
     }
@@ -325,7 +328,9 @@ class PianoPitchEngine(private val sampleRate: Float = 48_000f) {
     val result = PitchAnalysisResult(
       hasSignal = true,
       isTransientHold = false,
+      onsetDetected = onsetDetected,
       detectedKeyIndex = selectedKey,
+      bestAutoKeyIndex = bestAutoKey,
       detectedHz = detectedF1,
       targetHz = targetF1,
       centsError = centsErr,
